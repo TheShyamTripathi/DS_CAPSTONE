@@ -1,0 +1,32 @@
+[
+  {
+    "id": 1,
+    "userId": "student1",
+    "roomNumber": "A302",
+    "category": "Plumbing",
+    "description": "siwsmw s",
+    "status": "Resolved",
+    "date": "2026-01-04T20:20:07.867Z",
+    "updatedAt": "2026-01-04T20:51:50.332Z"
+  },
+  {
+    "id": 2,
+    "userId": "student1",
+    "roomNumber": "A103",
+    "category": "Plumbing",
+    "description": "Tap Leak",
+    "status": "Resolved",
+    "date": "2026-01-04T20:32:57.985Z",
+    "updatedAt": "2026-01-04T20:56:33.260Z"
+  },
+  {
+    "id": 3,
+    "userId": "student3",
+    "roomNumber": "A202",
+    "category": "Electricity",
+    "description": "Light Gone",
+    "status": "Resolved",
+    "date": "2026-01-04T20:56:18.737Z",
+    "updatedAt": "2026-01-04T20:56:30.123Z"
+  }
+]

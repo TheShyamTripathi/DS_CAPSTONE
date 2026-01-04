@@ -1,0 +1,34 @@
+{
+  "counts": {
+    "Good": 2,
+    "Average": 1,
+    "Poor": 2
+  },
+  "entries": [
+    {
+      "userId": "student1",
+      "type": "Good",
+      "date": "2026-01-04T20:33:02.263Z"
+    },
+    {
+      "userId": "admin",
+      "type": "Average",
+      "date": "2026-01-04T20:50:13.384Z"
+    },
+    {
+      "userId": "admin",
+      "type": "Good",
+      "date": "2026-01-04T20:50:19.679Z"
+    },
+    {
+      "userId": "admin",
+      "type": "Poor",
+      "date": "2026-01-04T20:50:24.898Z"
+    },
+    {
+      "userId": "student3",
+      "type": "Poor",
+      "date": "2026-01-04T20:55:47.630Z"
+    }
+  ]
+}

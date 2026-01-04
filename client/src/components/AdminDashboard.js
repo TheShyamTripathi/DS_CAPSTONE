@@ -72,18 +72,39 @@ const AdminDashboard = ({ user, onLogout }) => {
         console.log("Setting complaint stats:", complaintsRes.data.stats);
         setComplaintStats(complaintsRes.data.stats);
       }
+      
+      let loadedComplaints = [];
       if (complaintsDetailRes.data && complaintsDetailRes.data.success) {
         console.log("Setting complaints:", complaintsDetailRes.data.complaints);
-        setComplaints(complaintsDetailRes.data.complaints);
+        loadedComplaints = complaintsDetailRes.data.complaints;
       } else if (Array.isArray(complaintsDetailRes.data)) {
         console.log("Setting complaints from array:", complaintsDetailRes.data);
-        setComplaints(complaintsDetailRes.data);
+        loadedComplaints = complaintsDetailRes.data;
+      }
+      
+      if (loadedComplaints.length > 0) {
+        setComplaints(loadedComplaints);
+        // Recalculate stats from loaded complaints to ensure accuracy
+        setComplaintStats({
+          total: loadedComplaints.length,
+          pending: loadedComplaints.filter((c) => c.status === "Pending").length,
+          resolved: loadedComplaints.filter((c) => c.status === "Resolved").length,
+        });
       }
 
       // Set feedback stats
       if (messRes.data && messRes.data.success) {
         console.log("Setting mess stats:", messRes.data.stats);
-        setMessStats(messRes.data.stats);
+        const good = Number(messRes.data.stats.good) || 0;
+        const average = Number(messRes.data.stats.average) || 0;
+        const poor = Number(messRes.data.stats.poor) || 0;
+        const total = good + average + poor;
+        setMessStats({
+          good: good,
+          average: average,
+          poor: poor,
+          total: total,
+        });
       }
 
       // Set health status
@@ -127,7 +148,7 @@ const AdminDashboard = ({ user, onLogout }) => {
 
     newSocket.on("connect", () => {
       console.log("Admin socket connected:", newSocket.id);
-      // Request current complaints list from server via socket as a fallback
+      // Request current complaints list from server via socket
       newSocket.emit("getComplaints");
     });
 
@@ -135,57 +156,95 @@ const AdminDashboard = ({ user, onLogout }) => {
     newSocket.on("complaintsList", (list) => {
       console.log("Received complaintsList via socket:", list);
       if (Array.isArray(list)) {
-        setComplaints(list);
+        // Remove duplicates based on ID
+        const uniqueComplaints = list.filter((c, index, self) =>
+          index === self.findIndex((t) => Number(t.id) === Number(c.id))
+        );
+        setComplaints(uniqueComplaints);
         setComplaintStats({
-          total: list.length,
-          pending: list.filter((c) => c.status === "Pending").length,
-          resolved: list.filter((c) => c.status === "Resolved").length,
+          total: uniqueComplaints.length,
+          pending: uniqueComplaints.filter((c) => c.status === "Pending").length,
+          resolved: uniqueComplaints.filter((c) => c.status === "Resolved").length,
         });
       }
     });
 
     // Listen for real-time complaint updates
     newSocket.on("newComplaint", (complaint) => {
-      setComplaints((prev) => [complaint, ...prev]);
-      // Update stats as well
-      setComplaintStats((prev) => ({
-        ...prev,
-        total: prev.total + 1,
-        pending: prev.pending + 1,
-      }));
+      console.log("New complaint received via socket:", complaint);
+      setComplaints((prev) => {
+        // Check if complaint already exists to avoid duplicates
+        const exists = prev.some((c) => Number(c.id) === Number(complaint.id));
+        if (exists) {
+          return prev;
+        }
+        const updated = [complaint, ...prev];
+        // Recalculate stats
+        setComplaintStats({
+          total: updated.length,
+          pending: updated.filter((c) => c.status === "Pending").length,
+          resolved: updated.filter((c) => c.status === "Resolved").length,
+        });
+        return updated;
+      });
     });
 
     newSocket.on("complaintUpdated", (complaint) => {
-  setComplaints((prev) =>
-    prev.map((c) =>
-      Number(c.id) === Number(complaint.id) ? complaint : c
-    )
-  );
-});
+      console.log("Complaint updated via socket:", complaint);
+      setComplaints((prev) => {
+        const updated = prev.map((c) => (Number(c.id) === Number(complaint.id) ? complaint : c));
+        // Recalculate stats
+        setComplaintStats({
+          total: updated.length,
+          pending: updated.filter((c) => c.status === "Pending").length,
+          resolved: updated.filter((c) => c.status === "Resolved").length,
+        });
+        return updated;
+      });
+    });
 
     // Listen for real-time feedback updates
     newSocket.on("feedbackUpdate", (data) => {
+      console.log("Feedback update received via socket:", data);
       if (data.counts) {
-        setMessStats((prev) => ({
-          ...prev,
-          good: data.counts.Good || 0,
-          average: data.counts.Average || 0,
-          poor: data.counts.Poor || 0,
-          total:
-            (data.counts.Good || 0) +
-            (data.counts.Average || 0) +
-            (data.counts.Poor || 0),
-        }));
+        const good = Number(data.counts.Good) || 0;
+        const average = Number(data.counts.Average) || 0;
+        const poor = Number(data.counts.Poor) || 0;
+        const total = good + average + poor;
+        setMessStats({
+          good: good,
+          average: average,
+          poor: poor,
+          total: total,
+        });
       }
     });
 
+    // Initial load from REST API
     loadData();
-    const interval = setInterval(loadData, 5000);
 
     return () => {
-      clearInterval(interval);
       newSocket.disconnect();
     };
+  }, []);
+
+  // Periodically refresh health status
+  useEffect(() => {
+    const healthInterval = setInterval(() => {
+      axios
+        .get("http://localhost:5000/api/health", { withCredentials: true })
+        .then((res) => {
+          if (res.data && res.data.modules) {
+            setHealthStatus({
+              modules: res.data.modules,
+              timestamp: res.data.timestamp,
+            });
+          }
+        })
+        .catch((err) => console.error("Error fetching health:", err));
+    }, 5000); // Refresh every 5 seconds
+
+    return () => clearInterval(healthInterval);
   }, []);
 
   const handleAddNotice = async (e) => {
@@ -208,6 +267,21 @@ const AdminDashboard = ({ user, onLogout }) => {
         { status: newStatus },
         { withCredentials: true }
       );
+      // Update local state immediately
+      setComplaints((prev) => {
+        const updated = prev.map((c) => 
+          Number(c.id) === Number(complaintId) 
+            ? { ...c, status: newStatus, updatedAt: new Date().toISOString() }
+            : c
+        );
+        setComplaintStats({
+          total: updated.length,
+          pending: updated.filter((c) => c.status === "Pending").length,
+          resolved: updated.filter((c) => c.status === "Resolved").length,
+        });
+        return updated;
+      });
+      // Also reload to ensure consistency
       loadData();
     } catch (err) {
       console.error("Error updating complaint:", err);

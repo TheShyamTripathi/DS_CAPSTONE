@@ -68,6 +68,19 @@ const StudentDashboard = ({ user, onLogout }) => {
       setFeedbackCounts(data.counts);
     });
 
+    // -------- NOTICES UPDATES --------
+    newSocket.on("newNotice", (notice) => {
+      console.log("New notice received via socket:", notice);
+      setNotices((prev) => {
+        // Check if notice already exists to avoid duplicates
+        const exists = prev.some((n) => Number(n.id) === Number(notice.id));
+        if (exists) {
+          return prev;
+        }
+        return [notice, ...prev];
+      });
+    });
+
     // Initial requests
     newSocket.emit("getComplaints");
     newSocket.emit("registerPeer", { username: user.username });
