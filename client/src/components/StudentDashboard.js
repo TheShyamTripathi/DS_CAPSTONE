@@ -23,6 +23,9 @@ const StudentDashboard = ({ user, onLogout }) => {
   const [peers, setPeers] = useState([]);
   const [selectedPeer, setSelectedPeer] = useState(null);
   const [peerFiles, setPeerFiles] = useState([]);
+  const [myFiles, setMyFiles] = useState([]);
+  const [uploading, setUploading] = useState(false);
+  const [fileRequestPending, setFileRequestPending] = useState(null); // {fromPeerId, fileId, fileName}
 
   const [complaintForm, setComplaintForm] = useState({
     roomNumber: "",
@@ -42,24 +45,79 @@ const StudentDashboard = ({ user, onLogout }) => {
     // ----------- P2P EVENTS -----------
     newSocket.on("peerListUpdate", setPeers);
     newSocket.on("peerList", setPeers);
-    newSocket.on("peerFiles", (data) => setPeerFiles(data.files || []));
+    newSocket.on("peerFiles", (data) => {
+      setPeerFiles(data.files || []);
+      if (data.files && data.files.length === 0) {
+        alert("This peer has no files available.");
+      }
+    });
+    newSocket.on("myFiles", (data) => {
+      setMyFiles(data.files || []);
+    });
+    newSocket.on("peerFilesError", (data) => {
+      alert(data.message || "Error fetching peer files");
+      setPeerFiles([]);
+    });
+    newSocket.on("uploadSuccess", (data) => {
+      setUploading(false);
+      alert(`File uploaded successfully: ${data.fileName}`);
+      // Refresh peer list to show updated file count
+      newSocket.emit("getPeerList");
+      // Refresh my files
+      newSocket.emit("getMyFiles");
+    });
+    newSocket.on("uploadError", (data) => {
+      setUploading(false);
+      alert(data.message || "Error uploading file");
+    });
+    newSocket.on("fileRequestSent", (data) => {
+      alert("File request sent. Waiting for peer approval...");
+    });
+    newSocket.on("fileRequestError", (data) => {
+      alert(data.message || "Error requesting file");
+    });
+    newSocket.on("sendFileError", (data) => {
+      alert(data.message || "Error sending file");
+    });
 
     newSocket.on("fileReceived", (data) => {
-      alert(`File received: ${data.file.name}`);
-      const blob = new Blob([data.file.data]);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = data.file.name;
-      a.click();
+      try {
+        // Convert array back to Uint8Array, then to Blob
+        const uint8Array = new Uint8Array(data.file.data);
+        const blob = new Blob([uint8Array], { type: "application/octet-stream" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = data.file.name;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        alert(`File downloaded: ${data.file.name}`);
+      } catch (error) {
+        console.error("Error receiving file:", error);
+        alert("Error downloading file. Please try again.");
+      }
     });
 
     newSocket.on("fileRequest", (data) => {
-      if (window.confirm(`Peer requested ${data.fileName}. Send?`)) {
-        newSocket.emit("sendFile", {
-          toPeerId: data.fromPeerId,
-          fileId: data.fileId,
+      console.log("File request received:", data);
+      // Show a visible notification instead of just confirm dialog
+      setFileRequestPending({
+        fromPeerId: data.fromPeerId,
+        fileId: data.fileId,
+        fileName: data.fileName,
+        requesterUsername: data.requesterUsername || "Unknown peer",
+      });
+      
+      // Also show browser notification if possible
+      if (Notification.permission === "granted") {
+        new Notification("File Request", {
+          body: `${data.requesterUsername || "A peer"} requested file: ${data.fileName}`,
+          icon: "/favicon.ico",
         });
+      } else if (Notification.permission !== "denied") {
+        Notification.requestPermission();
       }
     });
 
@@ -85,6 +143,7 @@ const StudentDashboard = ({ user, onLogout }) => {
     newSocket.emit("getComplaints");
     newSocket.emit("registerPeer", { username: user.username });
     newSocket.emit("getPeerList");
+    newSocket.emit("getMyFiles");
 
     loadNotices();
     loadFeedbackCounts();
@@ -179,28 +238,70 @@ const StudentDashboard = ({ user, onLogout }) => {
     }
   };
 
-  // ---------------- P2P ----------------
+  // ---------------- P2P ---------------- 
   const handleSelectPeer = (peer) => {
+    if (!socket) {
+      alert("Connection lost. Please refresh the page.");
+      return;
+    }
     setSelectedPeer(peer.peerId);
+    setPeerFiles([]); // Clear previous files
     socket.emit("getPeerFiles", { targetPeerId: peer.peerId });
   };
 
   const handleFileUpload = (e) => {
     const file = e.target.files[0];
-    if (!file || !socket) return;
+    if (!file || !socket) {
+      alert("Please select a file and ensure connection is active");
+      return;
+    }
 
+    // Check file size (limit to 10MB for demo)
+    if (file.size > 10 * 1024 * 1024) {
+      alert("File size too large. Maximum size is 10MB.");
+      e.target.value = ""; // Reset input
+      return;
+    }
+
+    setUploading(true);
     const reader = new FileReader();
     reader.onload = (ev) => {
-      socket.emit("uploadFile", {
-        fileName: file.name,
-        fileSize: file.size,
-        fileData: ev.target.result,
-      });
+      try {
+        // Convert ArrayBuffer to array for JSON serialization
+        const arrayBuffer = ev.target.result;
+        const uint8Array = new Uint8Array(arrayBuffer);
+        const fileDataArray = Array.from(uint8Array);
+
+        socket.emit("uploadFile", {
+          fileName: file.name,
+          fileSize: file.size,
+          fileData: fileDataArray,
+        });
+      } catch (error) {
+        setUploading(false);
+        console.error("Error uploading file:", error);
+        alert("Error uploading file. Please try again.");
+      }
+    };
+    reader.onerror = () => {
+      setUploading(false);
+      alert("Error reading file. Please try again.");
     };
     reader.readAsArrayBuffer(file);
+    
+    // Reset input after upload
+    e.target.value = "";
   };
 
   const handleDownloadFile = (file) => {
+    if (!socket) {
+      alert("Connection lost. Please refresh the page.");
+      return;
+    }
+    if (!selectedPeer) {
+      alert("Please select a peer first.");
+      return;
+    }
     socket.emit("requestFile", {
       targetPeerId: selectedPeer,
       fileId: file.id,
@@ -224,8 +325,25 @@ const StudentDashboard = ({ user, onLogout }) => {
               key={tab}
               className={activeTab === tab ? "active" : ""}
               onClick={() => setActiveTab(tab)}
+              style={{position: 'relative'}}
             >
               {tab.toUpperCase()}
+              {tab === "resources" && fileRequestPending && (
+                <span style={{
+                  position: 'absolute',
+                  top: '-5px',
+                  right: '-5px',
+                  backgroundColor: '#f44336',
+                  color: 'white',
+                  borderRadius: '50%',
+                  width: '20px',
+                  height: '20px',
+                  fontSize: '12px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center'
+                }}>!</span>
+              )}
             </button>
           )
         )}
@@ -303,23 +421,28 @@ const StudentDashboard = ({ user, onLogout }) => {
             )}
 
             <h3>My Complaints</h3>
-            {complaints.length === 0 ? (
+            {complaints.filter(c => c.userId === user.username).length === 0 ? (
               <p className="empty-message">No complaints yet</p>
             ) : (
-              complaints.map((complaint, idx) => (
-                <div key={idx} className="card">
-                  <h4>Room {complaint.roomNumber}</h4>
-                  <p>
-                    <strong>Category:</strong> {complaint.category}
-                  </p>
-                  <p>
-                    <strong>Description:</strong> {complaint.description}
-                  </p>
-                  <p className="status-badge">
-                    {complaint.status || "Pending"}
-                  </p>
-                </div>
-              ))
+              complaints
+                .filter(c => c.userId === user.username)
+                .map((complaint, idx) => (
+                  <div key={complaint.id || idx} className="card">
+                    <h4>Room {complaint.roomNumber}</h4>
+                    <p>
+                      <strong>Category:</strong> {complaint.category}
+                    </p>
+                    <p>
+                      <strong>Description:</strong> {complaint.description}
+                    </p>
+                    <p className="status-badge">
+                      {complaint.status || "Pending"}
+                    </p>
+                    <small>
+                      Submitted: {new Date(complaint.date).toLocaleString()}
+                    </small>
+                  </div>
+                ))
             )}
           </>
         )}
@@ -434,6 +557,60 @@ const StudentDashboard = ({ user, onLogout }) => {
           </>
         )}
 
+        {/* FILE REQUEST MODAL */}
+        {fileRequestPending && (
+          <div style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(0,0,0,0.5)',
+            display: 'flex',
+            justifyContent: 'center',
+            alignItems: 'center',
+            zIndex: 1000
+          }}>
+            <div className="card" style={{
+              backgroundColor: 'white',
+              padding: '30px',
+              maxWidth: '500px',
+              width: '90%',
+              borderRadius: '10px',
+              boxShadow: '0 4px 6px rgba(0,0,0,0.3)'
+            }}>
+              <h3>📥 File Request</h3>
+              <p><strong>{fileRequestPending.requesterUsername}</strong> wants to download:</p>
+              <p style={{fontSize: '18px', margin: '15px 0'}}><strong>{fileRequestPending.fileName}</strong></p>
+              <div style={{display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '20px'}}>
+                <button
+                  onClick={() => {
+                    socket.emit("sendFile", {
+                      toPeerId: fileRequestPending.fromPeerId,
+                      fileId: fileRequestPending.fileId,
+                    });
+                    setFileRequestPending(null);
+                    alert("File sent successfully!");
+                  }}
+                  className="action-btn"
+                  style={{backgroundColor: '#4CAF50', color: 'white'}}
+                >
+                  ✅ Approve
+                </button>
+                <button
+                  onClick={() => {
+                    setFileRequestPending(null);
+                  }}
+                  className="action-btn"
+                  style={{backgroundColor: '#f44336', color: 'white'}}
+                >
+                  ❌ Deny
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* RESOURCES TAB */}
         {activeTab === "resources" && (
           <>
@@ -441,8 +618,29 @@ const StudentDashboard = ({ user, onLogout }) => {
 
             <div className="form-card">
               <h3>Upload File</h3>
-              <input type="file" onChange={handleFileUpload} accept="*" />
+              <input 
+                type="file" 
+                onChange={handleFileUpload} 
+                accept="*" 
+                disabled={uploading}
+              />
+              {uploading && <p style={{color: '#4CAF50', marginTop: '10px'}}>Uploading file... Please wait.</p>}
             </div>
+
+            <h3>My Uploaded Files</h3>
+            {myFiles.length === 0 ? (
+              <p className="empty-message">No files uploaded yet</p>
+            ) : (
+              <div className="peers-list">
+                {myFiles.map((file) => (
+                  <div key={file.id} className="card">
+                    <p><strong>{file.name}</strong></p>
+                    <p><small>{(file.size / 1024).toFixed(2)} KB</small></p>
+                    <p><small>Uploaded: {new Date(file.uploadedAt).toLocaleString()}</small></p>
+                  </div>
+                ))}
+              </div>
+            )}
 
             <h3>Available Peers</h3>
             {peers.length === 0 ? (

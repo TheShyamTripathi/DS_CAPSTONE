@@ -24,6 +24,13 @@ let messFeedbackEntries = [];
 let notices = [];
 let activeSessionsMap = new Map(); // Track active sessions
 
+// Module 4: P2P - Peer registry and file storage
+const peerRegistry = new Map(); // Map<socketId, {peerId, username, files: []}>
+const peerFiles = new Map(); // Map<fileId, {id, name, size, data, ownerPeerId}>
+
+// Module 5: Shared Memory - Synchronization lock
+let feedbackLock = false; // Simple mutex for feedback updates
+
 // Room database for RMI simulation
 const roomsDatabase = {
   A101: {
@@ -97,7 +104,7 @@ const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
-    origin: "http://localhost:3000",
+    origin: ["http://localhost:3000", "http://localhost:3001"],
     credentials: true,
   },
 });
@@ -107,7 +114,7 @@ const PORT = 5000;
 /* ---------------- MIDDLEWARE ---------------- */
 app.use(
   cors({
-    origin: "http://localhost:3000",
+    origin: ["http://localhost:3000", "http://localhost:3001"],
     credentials: true,
   })
 );
@@ -362,10 +369,291 @@ io.on("connection", (socket) => {
     socket.emit("complaintsList", complaints);
   });
 
+  // ---------------- P2P MODULE - PEER REGISTRATION ----------------
+  socket.on("registerPeer", (data) => {
+    const { username } = data;
+    if (!username) {
+      socket.emit("peerRegistrationError", { message: "Username required" });
+      return;
+    }
+
+    const peerInfo = {
+      peerId: socket.id,
+      username: username,
+      files: [],
+      registeredAt: Date.now(),
+    };
+
+    peerRegistry.set(socket.id, peerInfo);
+    console.log(`Peer registered: ${username} (${socket.id})`);
+
+    // Notify all peers about new peer
+    broadcastPeerList();
+  });
+
+  // ---------------- P2P MODULE - GET PEER LIST ----------------
+  socket.on("getPeerList", () => {
+    const peerList = Array.from(peerRegistry.values()).map((peer) => ({
+      peerId: peer.peerId,
+      username: peer.username,
+      fileCount: peer.files.length,
+    }));
+    socket.emit("peerList", peerList);
+  });
+
+  // ---------------- P2P MODULE - UPLOAD FILE ----------------
+  socket.on("uploadFile", (data) => {
+    const { fileName, fileSize, fileData } = data;
+    const peerInfo = peerRegistry.get(socket.id);
+
+    if (!peerInfo) {
+      socket.emit("uploadError", { message: "Peer not registered. Please refresh the page." });
+      return;
+    }
+
+    if (!fileName || !fileData) {
+      socket.emit("uploadError", { message: "File data required" });
+      return;
+    }
+
+    // Limit file size to 10MB for demo purposes
+    const maxSize = 10 * 1024 * 1024; // 10MB
+    if (fileSize > maxSize) {
+      socket.emit("uploadError", { message: "File size exceeds 10MB limit" });
+      return;
+    }
+
+    try {
+      // Convert array to Buffer
+      let fileBuffer;
+      if (Array.isArray(fileData)) {
+        fileBuffer = Buffer.from(fileData);
+      } else if (fileData instanceof ArrayBuffer) {
+        fileBuffer = Buffer.from(fileData);
+      } else if (Buffer.isBuffer(fileData)) {
+        fileBuffer = fileData;
+      } else {
+        // Try to convert to Buffer
+        fileBuffer = Buffer.from(fileData);
+      }
+
+      const fileId = `${socket.id}_${Date.now()}_${fileName.replace(/[^a-zA-Z0-9._-]/g, "_")}`;
+      const fileInfo = {
+        id: fileId,
+        name: fileName,
+        size: fileSize || fileBuffer.length,
+        data: fileBuffer,
+        ownerPeerId: socket.id,
+        uploadedAt: Date.now(),
+      };
+
+      peerFiles.set(fileId, fileInfo);
+      peerInfo.files.push(fileId);
+      peerRegistry.set(socket.id, peerInfo);
+
+      console.log(`File uploaded: ${fileName} by ${peerInfo.username} (${fileSize || fileBuffer.length} bytes)`);
+
+      // Notify peer about successful upload
+      socket.emit("uploadSuccess", {
+        fileId: fileId,
+        fileName: fileName,
+        message: "File uploaded successfully",
+      });
+
+      // Send updated file list to the peer
+      socket.emit("myFiles", {
+        files: peerInfo.files
+          .map((fid) => {
+            const fInfo = peerFiles.get(fid);
+            return fInfo
+              ? {
+                  id: fInfo.id,
+                  name: fInfo.name,
+                  size: fInfo.size,
+                  uploadedAt: fInfo.uploadedAt,
+                }
+              : null;
+          })
+          .filter((f) => f !== null),
+      });
+
+      // Update peer list for all clients
+      broadcastPeerList();
+    } catch (error) {
+      console.error("Error uploading file:", error);
+      socket.emit("uploadError", { message: "Error processing file: " + error.message });
+    }
+  });
+
+  // ---------------- P2P MODULE - GET PEER FILES ----------------
+  socket.on("getPeerFiles", (data) => {
+    const { targetPeerId } = data;
+    const targetPeer = peerRegistry.get(targetPeerId);
+
+    if (!targetPeer) {
+      socket.emit("peerFilesError", { message: "Peer not found" });
+      return;
+    }
+
+    const files = targetPeer.files
+      .map((fileId) => {
+        const fileInfo = peerFiles.get(fileId);
+        if (!fileInfo) return null;
+        return {
+          id: fileInfo.id,
+          name: fileInfo.name,
+          size: fileInfo.size,
+        };
+      })
+      .filter((f) => f !== null);
+
+    socket.emit("peerFiles", { files: files, peerId: targetPeerId });
+  });
+
+  // ---------------- P2P MODULE - GET MY FILES ----------------
+  socket.on("getMyFiles", () => {
+    const peerInfo = peerRegistry.get(socket.id);
+    if (!peerInfo) {
+      socket.emit("myFiles", { files: [] });
+      return;
+    }
+
+    const files = peerInfo.files
+      .map((fileId) => {
+        const fileInfo = peerFiles.get(fileId);
+        if (!fileInfo) return null;
+        return {
+          id: fileInfo.id,
+          name: fileInfo.name,
+          size: fileInfo.size,
+          uploadedAt: fileInfo.uploadedAt,
+        };
+      })
+      .filter((f) => f !== null);
+
+    socket.emit("myFiles", { files: files });
+  });
+
+  // ---------------- P2P MODULE - REQUEST FILE ----------------
+  socket.on("requestFile", (data) => {
+    const { targetPeerId, fileId } = data;
+    const fileInfo = peerFiles.get(fileId);
+
+    if (!fileInfo) {
+      socket.emit("fileRequestError", { message: "File not found" });
+      return;
+    }
+
+    if (fileInfo.ownerPeerId !== targetPeerId) {
+      socket.emit("fileRequestError", { message: "File owner mismatch" });
+      return;
+    }
+
+    // Find the owner's socket and request permission
+    const ownerSocket = io.sockets.sockets.get(targetPeerId);
+    if (!ownerSocket) {
+      socket.emit("fileRequestError", { message: "Peer offline" });
+      return;
+    }
+
+    // Get requester's username
+    const requesterPeer = peerRegistry.get(socket.id);
+    const requesterUsername = requesterPeer ? requesterPeer.username : "Unknown";
+
+    // Request permission from owner
+    ownerSocket.emit("fileRequest", {
+      fromPeerId: socket.id,
+      fileId: fileId,
+      fileName: fileInfo.name,
+      requesterUsername: requesterUsername,
+    });
+
+    console.log(`File request: ${requesterUsername} (${socket.id}) requested ${fileInfo.name} from peer ${targetPeerId}`);
+    socket.emit("fileRequestSent", { message: "File request sent to peer" });
+  });
+
+  // ---------------- P2P MODULE - SEND FILE (AFTER PERMISSION) ----------------
+  socket.on("sendFile", (data) => {
+    const { toPeerId, fileId } = data;
+    const fileInfo = peerFiles.get(fileId);
+
+    if (!fileInfo) {
+      socket.emit("sendFileError", { message: "File not found" });
+      return;
+    }
+
+    if (fileInfo.ownerPeerId !== socket.id) {
+      socket.emit("sendFileError", { message: "You don't own this file" });
+      return;
+    }
+
+    const recipientSocket = io.sockets.sockets.get(toPeerId);
+    if (!recipientSocket) {
+      socket.emit("sendFileError", { message: "Recipient peer offline" });
+      return;
+    }
+
+    try {
+      // Convert Buffer to array for JSON serialization
+      let fileDataArray;
+      if (Buffer.isBuffer(fileInfo.data)) {
+        fileDataArray = Array.from(fileInfo.data);
+      } else if (fileInfo.data instanceof Uint8Array) {
+        fileDataArray = Array.from(fileInfo.data);
+      } else if (Array.isArray(fileInfo.data)) {
+        fileDataArray = fileInfo.data;
+      } else {
+        // Try to convert to array
+        fileDataArray = Array.from(new Uint8Array(fileInfo.data));
+      }
+
+      // Send file to requesting peer
+      recipientSocket.emit("fileReceived", {
+        file: {
+          name: fileInfo.name,
+          size: fileInfo.size,
+          data: fileDataArray,
+        },
+      });
+
+      console.log(`File sent: ${fileInfo.name} (${fileInfo.size} bytes) from ${socket.id} to ${toPeerId}`);
+      socket.emit("sendFileSuccess", { message: "File sent successfully" });
+    } catch (error) {
+      console.error("Error sending file:", error);
+      socket.emit("sendFileError", { message: "Error processing file data" });
+    }
+  });
+
+  // ---------------- P2P MODULE - DISCONNECT CLEANUP ----------------
   socket.on("disconnect", () => {
     console.log("Client disconnected:", socket.id);
+
+    // Clean up peer registration
+    if (peerRegistry.has(socket.id)) {
+      const peerInfo = peerRegistry.get(socket.id);
+      console.log(`Peer disconnected: ${peerInfo.username} (${socket.id})`);
+
+      // Remove peer's files from global registry
+      peerInfo.files.forEach((fileId) => {
+        peerFiles.delete(fileId);
+      });
+
+      peerRegistry.delete(socket.id);
+      broadcastPeerList();
+    }
   });
 });
+
+// Helper function to broadcast peer list to all connected clients
+function broadcastPeerList() {
+  const peerList = Array.from(peerRegistry.values()).map((peer) => ({
+    peerId: peer.peerId,
+    username: peer.username,
+    fileCount: peer.files.length,
+  }));
+
+  io.emit("peerListUpdate", peerList);
+}
 
 /* ---------------- COMPLAINT APIs ---------------- */
 app.get("/api/complaints", (req, res) => {
@@ -400,8 +688,8 @@ app.put("/api/complaints/:id", (req, res) => {
   res.json({ success: true, complaint });
 });
 
-/* ---------------- MESS FEEDBACK (FIXED) ---------------- */
-app.post("/api/mess-feedback", (req, res) => {
+/* ---------------- MESS FEEDBACK (SHARED MEMORY WITH SYNCHRONIZATION) ---------------- */
+app.post("/api/mess-feedback", async (req, res) => {
   const { feedback } = req.body;
   const userId = req.session.userId;
 
@@ -409,41 +697,66 @@ app.post("/api/mess-feedback", (req, res) => {
     return res.status(401).json({ success: false });
   }
 
-  const today = new Date().toISOString().split("T")[0];
-  const key = `${userId}_${today}`;
-  const count = dailyFeedbackMap.get(key) || 0;
-
-  if (count >= 3) {
-    return res.status(429).json({
+  if (!["Good", "Average", "Poor"].includes(feedback)) {
+    return res.status(400).json({
       success: false,
-      message: "You can submit only 3 feedbacks per day",
+      message: "Invalid feedback type",
     });
   }
 
-  dailyFeedbackMap.set(key, count + 1);
+  // Acquire lock (mutex) - wait if locked
+  while (feedbackLock) {
+    await new Promise((resolve) => setTimeout(resolve, 10)); // Wait 10ms and retry
+  }
 
-  messFeedbackEntries.push({
-    userId,
-    type: feedback,
-    date: new Date().toISOString(),
-  });
+  try {
+    // Critical section - only one thread can execute this at a time
+    feedbackLock = true;
 
-  messFeedbackCounts[feedback]++;
-  saveFeedback(); // Save to file
+    const today = new Date().toISOString().split("T")[0];
+    const key = `${userId}_${today}`;
+    const count = dailyFeedbackMap.get(key) || 0;
 
-  console.log(
-    "Feedback submitted:",
-    feedback,
-    "Total counts:",
-    messFeedbackCounts
-  );
-  io.emit("feedbackUpdate", { counts: messFeedbackCounts });
+    if (count >= 3) {
+      return res.status(429).json({
+        success: false,
+        message: "You can submit only 3 feedbacks per day",
+      });
+    }
 
-  res.json({
-    success: true,
-    counts: messFeedbackCounts,
-    remaining: 3 - (count + 1),
-  });
+    dailyFeedbackMap.set(key, count + 1);
+
+    messFeedbackEntries.push({
+      userId,
+      type: feedback,
+      date: new Date().toISOString(),
+    });
+
+    // Atomic increment operation (protected by lock)
+    messFeedbackCounts[feedback] = (messFeedbackCounts[feedback] || 0) + 1;
+    saveFeedback(); // Save to file
+
+    console.log(
+      "Feedback submitted:",
+      feedback,
+      "Total counts:",
+      messFeedbackCounts,
+      "User:",
+      userId
+    );
+
+    // Broadcast update to all clients
+    io.emit("feedbackUpdate", { counts: { ...messFeedbackCounts } });
+
+    res.json({
+      success: true,
+      counts: { ...messFeedbackCounts },
+      remaining: 3 - (count + 1),
+    });
+  } finally {
+    // Release lock
+    feedbackLock = false;
+  }
 });
 
 app.get("/api/mess-feedback/stats", (req, res) => {
